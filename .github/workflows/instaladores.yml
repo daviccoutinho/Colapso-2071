@@ -1,0 +1,54 @@
+# Gera os instaladores do Colapso 2071 para Linux, Windows e macOS.
+# Jeito mais simples (pelo site): Releases > "Create a new release" > tag v1.0 > "Publish release".
+# Os arquivos são gerados e anexados sozinhos à release, prontos para qualquer pessoa baixar (leva uns 10 minutos).
+# Também roda pela aba Actions (botão "Run workflow"); aí os arquivos ficam em "Artifacts".
+# Quem gera os instaladores é o Empacotar.java, na raiz do projeto.
+name: Instaladores
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  empacotar:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Testes
+        run: mvn -B test
+
+      - name: Gerar o JAR
+        run: mvn -B -DskipTests package
+
+      - name: Ferramentas do .deb (só Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq fakeroot
+
+      - name: Gerar instaladores (Empacotar.java)
+        run: java Empacotar.java
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: colapso2071-${{ runner.os }}
+          path: dist/*
+
+      - name: Publicar no Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
