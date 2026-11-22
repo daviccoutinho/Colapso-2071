@@ -39,6 +39,8 @@ public class Empacotar {
     static final Path JAR = Path.of("target", "colapso2071.jar");
     static final Path PACOTE = Path.of("target", "pacote");
     static final Path DIST = Path.of("dist");
+    /** A pasta do programa (app-image) é montada fora de dist/, que só recebe os arquivos para download. */
+    static final Path IMAGEM = Path.of("target", "imagem");
 
     public static void main(String[] args) throws Exception {
         String versao = versaoDoPom();
@@ -48,6 +50,7 @@ public class Empacotar {
             System.exit(1);
         }
         apagar(PACOTE);
+        apagar(IMAGEM);
         apagar(DIST);
         Files.createDirectories(PACOTE);
         Files.createDirectories(DIST);
@@ -57,7 +60,7 @@ public class Empacotar {
         if (sistema.contains("win")) {
             windows(versao);
         } else if (sistema.contains("mac")) {
-            jpackage(versao, "--type", "dmg", "--icon", "arte/icone/icone.icns", "--mac-package-name", "Colapso 2071");
+            jpackage(DIST, versao, "--type", "dmg", "--icon", "arte/icone/icone.icns", "--mac-package-name", "Colapso 2071");
         } else {
             linux(versao);
         }
@@ -70,41 +73,60 @@ public class Empacotar {
 
     private static void linux(String versao) throws IOException {
         // pasta portátil: descompacte e rode Colapso2071/bin/Colapso2071
-        jpackage(versao, "--type", "app-image", "--icon", "arte/icone/icone.png");
-        Path tar = DIST.resolve(NOME + "-" + versao + "-linux-portatil.tar.gz");
-        Tar.gerar(DIST.resolve(NOME), tar);
-        apagar(DIST.resolve(NOME));
+        jpackage(IMAGEM, versao, "--type", "app-image", "--icon", "arte/icone/icone.png");
+        Tar.gerar(IMAGEM.resolve(NOME), DIST.resolve(NOME + "-" + versao + "-linux-portatil.tar.gz"));
 
         String[] menu = {"--icon", "arte/icone/icone.png", "--linux-shortcut", "--linux-menu-group", "Game",
                 "--linux-package-name", "colapso2071"};
         if (existeNoPath("dpkg-deb") && existeNoPath("fakeroot")) {
-            jpackage(versao, juntar(new String[]{"--type", "deb", "--linux-app-category", "games"}, menu));
+            opcional("deb", () -> jpackage(DIST, versao,
+                    juntar(new String[]{"--type", "deb", "--linux-app-category", "games"}, menu)));
         } else {
             System.out.println("Sem dpkg-deb ou fakeroot: pulei o .deb (no Ubuntu/Zorin: instale o pacote fakeroot)");
         }
         if (existeNoPath("rpmbuild")) {
-            jpackage(versao, juntar(new String[]{"--type", "rpm"}, menu));
+            opcional("rpm", () -> jpackage(DIST, versao, juntar(new String[]{"--type", "rpm"}, menu)));
         }
     }
 
     private static void windows(String versao) throws IOException {
         // versão portátil (não precisa instalar)
-        jpackage(versao, "--type", "app-image", "--icon", "arte/icone/icone.ico");
-        Path zip = DIST.resolve(NOME + "-" + versao + "-windows-portatil.zip");
-        zipar(DIST.resolve(NOME), zip);
-        apagar(DIST.resolve(NOME));
+        jpackage(IMAGEM, versao, "--type", "app-image", "--icon", "arte/icone/icone.ico");
+        zipar(IMAGEM.resolve(NOME), DIST.resolve(NOME + "-" + versao + "-windows-portatil.zip"));
 
-        // instalador .exe: o jpackage usa o WiX Toolset (https://wixtoolset.org)
-        if (existeNoPath("candle.exe") || existeNoPath("wix.exe")) {
-            jpackage(versao, "--type", "exe", "--icon", "arte/icone/icone.ico", "--win-menu", "--win-menu-group",
-                    "Colapso 2071", "--win-shortcut", "--win-dir-chooser", "--win-per-user-install");
+        // instalador .exe: o jpackage do JDK 21 usa o WiX Toolset 3 (candle.exe e light.exe, https://wixtoolset.org)
+        if (existeNoPath("candle.exe") && existeNoPath("light.exe")) {
+            opcional("exe", () -> jpackage(DIST, versao, "--type", "exe", "--icon", "arte/icone/icone.ico",
+                    "--win-menu", "--win-menu-group", "Colapso 2071", "--win-shortcut", "--win-dir-chooser",
+                    "--win-per-user-install"));
         } else {
-            System.out.println("WiX Toolset não encontrado: gerei só a versão portátil (.zip).");
+            System.out.println("WiX Toolset 3 não encontrado: gerei só a versão portátil (.zip).");
+        }
+    }
+
+    /** Instaladores extras (.deb, .rpm, .exe): se falharem, avisa e segue, para a versão portátil sair mesmo assim. */
+    private static void opcional(String tipo, Runnable passo) {
+        try {
+            passo.run();
+        } catch (RuntimeException e) {
+            System.out.println("Não consegui gerar o ." + tipo + " (" + e.getMessage() + "); a versão portátil continua.");
+            try {
+                // não deixa arquivo pela metade na pasta de download
+                try (Stream<Path> sobras = Files.list(DIST)) {
+                    for (Path p : (Iterable<Path>) sobras::iterator) {
+                        if (p.getFileName().toString().endsWith("." + tipo)) {
+                            Files.deleteIfExists(p);
+                        }
+                    }
+                }
+            } catch (IOException ignorada) {
+                // nada a fazer
+            }
         }
     }
 
     /** Chama o jpackage do próprio JDK com as opções comuns mais as do sistema. */
-    private static void jpackage(String versao, String... extras) {
+    private static void jpackage(Path destino, String versao, String... extras) {
         ToolProvider jpackage = ToolProvider.findFirst("jpackage").orElseThrow(
                 () -> new IllegalStateException("jpackage não encontrado: use um JDK 21 completo (não só o JRE)"));
         List<String> opcoes = new ArrayList<>(List.of(
@@ -118,7 +140,7 @@ public class Empacotar {
                 "--java-options", "--enable-native-access=ALL-UNNAMED",
                 "--java-options", "-Djdk.gtk.version=3",
                 "--jlink-options", "--strip-debug --no-man-pages --no-header-files",
-                "--dest", DIST.toString()));
+                "--dest", destino.toString()));
         opcoes.addAll(List.of(extras));
         System.out.println("jpackage " + String.join(" ", extras));
         int codigo = jpackage.run(System.out, System.err, opcoes.toArray(String[]::new));
@@ -173,6 +195,7 @@ public class Empacotar {
         }
         try (Stream<Path> tudo = Files.walk(caminho)) {
             for (Path p : (Iterable<Path>) tudo.sorted(Comparator.reverseOrder())::iterator) {
+                p.toFile().setWritable(true); // no Windows, arquivos somente-leitura não se deixam apagar
                 Files.delete(p);
             }
         }
